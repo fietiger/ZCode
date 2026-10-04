@@ -58,45 +58,58 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # @zcode/shared is the only source-only workspace package in the CLI/TUI
+      # closure: it has no `build` script, so turbo never emits its dist/.
+      # The TUI asset collector requires dist/index.js for every workspace
+      # package it walks, so emit it explicitly first. (@zcode/zcode-cua also
+      # has no build script but ships hand-written JS, so it needs nothing.)
+      - name: Build source-only workspace packages
+        run: pnpm exec tsc -b packages/shared
+
       - name: Build CLI distribution
-        run: pnpm build:zcode --base-url "${{ inputs.base_url || 'https://github.com/fietiger/ZCode/releases/download/cli-dist/' }}"
+        run: node scripts/build-zcode-cli-only.mjs --target linux-x64 --base-url "${{ inputs.base_url || 'https://github.com/fietiger/ZCode/releases/download/cli-dist/' }}"
 
       - name: Locate artifacts
         id: artifacts
         run: |
           set -euo pipefail
-          latest="$(cat dist/zcode/latest.json)"
+          latest="$(cat dist/zcode-cli/latest.json)"
           version="$(printf '%s' "$latest" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(JSON.parse(d).version))")"
           tarball="$(printf '%s' "$latest" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(JSON.parse(d).tarball))")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
-          echo "path=dist/zcode/releases/$version/$tarball" >> "$GITHUB_OUTPUT"
-          ls -la "dist/zcode/releases/$version/"
-          du -sh "dist/zcode/releases/$version/$tarball"
-          sha256sum "dist/zcode/releases/$version/$tarball"
+          echo "path=dist/zcode-cli/releases/$version/$tarball" >> "$GITHUB_OUTPUT"
+          ls -la "dist/zcode-cli/releases/$version/"
+          du -sh "dist/zcode-cli/releases/$version/$tarball"
 
-      - name: Smoke test the packaged runtime
+      # `zcode.mjs` without `--web` only loads the agent bundle, but the TUI
+      # resolves @zcode/tui and playwright-core from agent/node_modules at
+      # runtime, so assert both are present before declaring the build good.
+      - name: Smoke test the packaged CLI
         run: |
           set -euo pipefail
-          version="${{ steps.artifacts.outputs.version }}"
           work="$RUNNER_TEMP/smoke"
           mkdir -p "$work"
           tar -xzf "${{ steps.artifacts.outputs.path }}" -C "$work"
           runtime="$work/zcode"
           test -f "$runtime/bin/zcode.mjs"
           test -f "$runtime/agent/zcode.cjs"
-          test -f "$runtime/server/entry-http.js"
-          test -d "$runtime/web"
+          test -f "$runtime/agent/provider/zcode-builtin.json"
+          test -f "$runtime/agent/node_modules/@zcode/tui/package.json"
+          test -f "$runtime/agent/node_modules/playwright-core/package.json"
           node "$runtime/bin/zcode.mjs" --version
+          echo "--- CLI-only package does not ship web/server (expected) ---"
+          test ! -d "$runtime/web" && echo "confirmed: no web/ dir"
+          test ! -d "$runtime/server" && echo "confirmed: no server/ dir"
 
       - name: Upload CLI distribution
         uses: actions/upload-artifact@v4
         with:
           name: zcode-cli-linux-x64
           path: |
-            dist/zcode/releases/${{ steps.artifacts.outputs.version }}/*.tar.gz
-            dist/zcode/releases/${{ steps.artifacts.outputs.version }}/sha256.txt
-            dist/zcode/install.sh
-            dist/zcode/latest.json
+            dist/zcode-cli/releases/${{ steps.artifacts.outputs.version }}/*.tar.gz
+            dist/zcode-cli/releases/${{ steps.artifacts.outputs.version }}/sha256.txt
+            dist/zcode-cli/install.sh
+            dist/zcode-cli/latest.json
           retention-days: 90
           if-no-files-found: error
