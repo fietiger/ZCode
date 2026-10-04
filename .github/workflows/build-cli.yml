@@ -1,0 +1,102 @@
+name: Build ZCode CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Base URL baked into install.sh (only used by that script)"
+        required: false
+        default: "https://github.com/fietiger/ZCode/releases/download/cli-dist/"
+  push:
+    tags:
+      - "zcode-cli-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zcode-cli-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build linux-x64 CLI distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NODE_VERSION: "24.14.0"
+      PNPM_VERSION: "10.33.2"
+      # The desktop runtime is not part of the CLI distribution; skip the binary download.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      COREPACK_ENABLE_PROJECT_SPEC: "0"
+      CI: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Report toolchain
+        run: |
+          node --version
+          pnpm --version
+          df -h "$RUNNER_TEMP" | tail -1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build CLI distribution
+        run: pnpm build:zcode --base-url "${{ inputs.base_url || 'https://github.com/fietiger/ZCode/releases/download/cli-dist/' }}"
+
+      - name: Locate artifacts
+        id: artifacts
+        run: |
+          set -euo pipefail
+          latest="$(cat dist/zcode/latest.json)"
+          version="$(printf '%s' "$latest" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(JSON.parse(d).version))")"
+          tarball="$(printf '%s' "$latest" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(JSON.parse(d).tarball))")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "path=dist/zcode/releases/$version/$tarball" >> "$GITHUB_OUTPUT"
+          ls -la "dist/zcode/releases/$version/"
+          du -sh "dist/zcode/releases/$version/$tarball"
+          sha256sum "dist/zcode/releases/$version/$tarball"
+
+      - name: Smoke test the packaged runtime
+        run: |
+          set -euo pipefail
+          version="${{ steps.artifacts.outputs.version }}"
+          work="$RUNNER_TEMP/smoke"
+          mkdir -p "$work"
+          tar -xzf "${{ steps.artifacts.outputs.path }}" -C "$work"
+          runtime="$work/zcode"
+          test -f "$runtime/bin/zcode.mjs"
+          test -f "$runtime/agent/zcode.cjs"
+          test -f "$runtime/server/entry-http.js"
+          test -d "$runtime/web"
+          node "$runtime/bin/zcode.mjs" --version
+
+      - name: Upload CLI distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: zcode-cli-linux-x64
+          path: |
+            dist/zcode/releases/${{ steps.artifacts.outputs.version }}/*.tar.gz
+            dist/zcode/releases/${{ steps.artifacts.outputs.version }}/sha256.txt
+            dist/zcode/install.sh
+            dist/zcode/latest.json
+          retention-days: 90
+          if-no-files-found: error
